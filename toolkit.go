@@ -584,7 +584,7 @@ func bytesEqual(a, b []byte) bool {
 func (tk *Toolkit) runExploit(exp Exploit, binary string) bool {
 	timeout := exp.Timeout
 	if timeout <= 0 {
-		timeout = 2 * time.Minute
+		timeout = 30 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
