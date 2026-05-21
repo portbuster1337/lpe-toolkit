@@ -147,9 +147,6 @@ func distroExtraFixed(distro DistroInfo, kv KernelVersion) []string {
 //go:embed exploits/*.c
 var exploitFS embed.FS
 
-//go:embed exploits/bin/*
-var precompiledFS embed.FS
-
 // ── Exploit definition ──────────────────────────────────────────────────────
 
 type Exploit struct {
@@ -308,7 +305,7 @@ func NewToolkit(verbose bool, skipped map[string]bool) *Toolkit {
 			Timeout:     30 * time.Second,
 			CompileCmd:  []string{"gcc"},
 			SkipCheck: func() bool {
-				_, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", "cve_2024_1086."+runtime.GOARCH))
+				_, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", runtime.GOARCH, "cve_2024_1086"))
 				return err != nil
 			},
 			SuccessCheck: func() bool { return true },
@@ -385,8 +382,7 @@ func (tk *Toolkit) log(format string, args ...interface{}) {
 func (tk *Toolkit) resolveBinary(exp Exploit) (string, error) {
 	// Pre-compiled: try exploits/bin/<name>.<GOARCH>
 	arch := runtime.GOARCH
-	binName := fmt.Sprintf("%s.%s", exp.Name, arch)
-	data, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", binName))
+	data, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", arch, exp.Name))
 	if err == nil && len(data) > 0 {
 		binPath := filepath.Join(tk.tmpDir, exp.Name)
 		if err := os.WriteFile(binPath, data, 0755); err != nil {
@@ -650,7 +646,7 @@ func (tk *Toolkit) PrintPlan() {
 		var mode string
 		if exp.GoHandler != nil {
 			mode = "go-handler"
-		} else if _, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", exp.Name+"."+runtime.GOARCH)); err == nil {
+		} else if _, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", runtime.GOARCH, exp.Name)); err == nil {
 			mode = "pre-built"
 		} else {
 			mode = "compile"
@@ -792,7 +788,7 @@ func (tk *Toolkit) Run() {
 }
 
 func (tk *Toolkit) binaryMode() string {
-	_, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", "dirtyfrag."+runtime.GOARCH))
+	_, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", runtime.GOARCH, "dirtyfrag"))
 	if err == nil {
 		return "standalone (pre-compiled, no gcc needed)"
 	}
