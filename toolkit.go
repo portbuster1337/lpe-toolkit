@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // ── Kernel version ──────────────────────────────────────────────────────────
@@ -157,6 +159,7 @@ type Exploit struct {
 	Description  string
 	Introduced   string
 	FixedIn      []string
+	Timeout      time.Duration       // max execution time (0 = default 2m)
 	SkipCheck    func() bool
 	SuccessCheck func() bool        // nil = use default (isPageCachePwned)
 	GoHandler    func(tk *Toolkit) bool // if set, used instead of binary execution
@@ -302,6 +305,7 @@ func NewToolkit(verbose bool, skipped map[string]bool) *Toolkit {
 			Description: "CVE-2024-1086: nftables UAF (Notselwyn, multi-file)",
 			Introduced:  "3.15",
 			FixedIn:     []string{"6.8"},
+			Timeout:     30 * time.Second,
 			CompileCmd:  []string{"gcc"},
 			SkipCheck: func() bool {
 				_, err := precompiledFS.ReadFile(filepath.Join("exploits/bin", "cve_2024_1086."+runtime.GOARCH))
@@ -578,7 +582,14 @@ func bytesEqual(a, b []byte) bool {
 // ── Exploit runner ──────────────────────────────────────────────────────────
 
 func (tk *Toolkit) runExploit(exp Exploit, binary string) bool {
-	cmd := exec.Command(binary)
+	timeout := exp.Timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binary)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -592,7 +603,11 @@ func (tk *Toolkit) runExploit(exp Exploit, binary string) bool {
 
 	if exp.SuccessCheck != nil {
 		if err != nil {
-			tk.log("Exploit exited with error: %v", err)
+			if ctx.Err() == context.DeadlineExceeded {
+				tk.log("Exploit timed out after %v", timeout)
+			} else {
+				tk.log("Exploit exited with error: %v", err)
+			}
 			return false
 		}
 		return exp.SuccessCheck()
