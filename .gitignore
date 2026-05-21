@@ -1,0 +1,7 @@
+lpe-toolkit
+lpe-toolkit-amd64
+lpe-toolkit-arm64
+lpe-toolkit-386
+/tmp
+*.swp
+*.swo
