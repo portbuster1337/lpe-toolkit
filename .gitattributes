@@ -1,0 +1,12 @@
+# Kernel headers — vendored, not project source
+exploits/cve_2024_1086/include/** linguist-vendored
+exploits/lib/include/** linguist-vendored
+
+# Pre-compiled binary artifacts
+exploits/bin/* linguist-vendored
+exploits/lib/*.a linguist-vendored
+exploits/cve_2024_1086/lib/*.a linguist-vendored
+
+# Documentation/license files
+*.md linguist-documentation
+LICENSE.md linguist-documentation
