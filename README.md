@@ -14,7 +14,13 @@ Multi-architecture privilege escalation toolkit with 18 pre-built and runtime-co
 # skip specific exploits
 ./lpe-toolkit --skip "dirtyfrag,dirtypipe"
 
-# verbose output
+# execute a command once root is achieved and show its output
+./lpe-toolkit -c "id"
+
+# silent automation: suppress all output except the command result
+./lpe-toolkit -q -c "whoami"
+
+# verbose output (includes exploit stdout/stderr)
 ./lpe-toolkit -v
 ```
 
@@ -25,7 +31,11 @@ Multi-architecture privilege escalation toolkit with 18 pre-built and runtime-co
 | `--dry-run` | Show which exploits are available/skipped |
 | `--just-build` | Resolve all exploits, print paths, exit (useful for packaging) |
 | `--skip LIST` | Comma-separated exploit names to skip |
-| `-v` | Verbose logging |
+| `-c`, `--command CMD` | Execute CMD as root instead of spawning an interactive shell |
+| `-q`, `--quiet` | Suppress toolkit messages; only show root shell output or `unsuccessful in getting root` |
+| `-v`, `--verbose` | Include exploit stdout/stderr in output (mutually exclusive with `-q`) |
+
+**Note:** `-v` and `-q` are mutually exclusive — the toolkit exits with an error if both are specified.
 
 ## Exploits
 
@@ -76,7 +86,14 @@ The pre-compiled binary archive for each release includes a statically linked Go
 
 ## Architecture
 
-- **`toolkit.go`**: Core exploit definitions, kernel version parsing, binary resolution, GTFOBins sudo abuse handler
-- **`main.go`**: CLI entry point with flags and signal handling
+- **`toolkit.go`**: Core exploit definitions, kernel version parsing, binary resolution, GTFOBins sudo abuse handler, `execCommandAsRoot()` for non-interactive command execution, `msg()`/`say()` verbosity helpers
+- **`main.go`**: CLI entry point with flags (`-c`, `-q`, `-v`, `--skip`, `--dry-run`, `--just-build`) and signal handling
 - **`build-exploits.sh`**: Cross-compilation script for C exploits
 - **`exploits/`**: C source files and pre-compiled binaries embedded via `//go:embed`
+
+### Notable Changes
+
+- All exploits (including leak-only/PoC-only) now spawn a root shell or execute the requested command
+- **cve_2026_46333.c**: Added `try_passwd_root()` — steals writable `/etc/shadow` fd from `passwd`, writes a known password hash, then spawns `su -`; falls back to leak-only methods
+- **cve_2025_38352.c**: Added dirtypipe-style `splice()` overwrite of `/etc/passwd` → `root::0:0:` → spawns `su -`
+- **Command mode**: Page-cache exploits use `--corrupt-only` to skip the interactive PTY bridge; `execCommandAsRoot()` pipes the command to `su` stdin for reliable non-interactive execution
