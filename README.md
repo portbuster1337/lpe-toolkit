@@ -1,6 +1,6 @@
 # Linux LPE Toolkit
 
-Multi-architecture privilege escalation toolkit with 18 pre-built and runtime-compilable exploits. Detects kernel version, filters patched exploits, and tries each in order until root is obtained.
+Multi-architecture privilege escalation toolkit with 18 pre-built and runtime-compilable exploits. Supports amd64, arm64, 386, mips, mipsle, mips64, and mips64le. Detects kernel version, filters patched exploits, and tries each in order until root is obtained.
 
 ## Quick Start
 
@@ -76,13 +76,19 @@ make run-source
 make clean
 ```
 
-Requirements: Go 1.21+, gcc, and cross-compilers for arm64/aarch64-linux-gnu-gcc and 386/i686-linux-gnu-gcc.
+Requirements: Go 1.21+, gcc, and cross-compilers for target architectures:
+- **arm64**: `aarch64-linux-gnu-gcc`
+- **386**: `i686-linux-gnu-gcc`
+- **mips**: `mips-linux-gnu-gcc`
+- **mipsle**: `mipsel-linux-gnu-gcc`
+- **mips64**: `mips64-linux-gnuabi64-gcc`
+- **mips64le**: `mips64el-linux-gnuabi64-gcc`
 
 ## Pre-Compiled Binary Packaging
 
 The `--just-build` flag resolves all usable exploits and prints their paths. Use it to verify what will be available at runtime.
 
-The pre-compiled binary archive for each release includes a statically linked Go binary with embedded C pre-compiled for all three architectures (amd64, arm64, 386).
+The pre-compiled binary archive for each release includes a statically linked Go binary with embedded C exploits pre-compiled for all supported architectures (amd64, arm64, 386, mips, mipsle, mips64, mips64le).
 
 ## Architecture
 
